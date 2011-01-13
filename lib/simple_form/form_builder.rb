@@ -127,22 +127,9 @@ module SimpleForm
       raise "Association #{association.inspect} not found" unless reflection
 
       options[:as] ||= :select
-      options[:collection] ||= reflection.klass.all(reflection.options.slice(:conditions, :order))
+      options[:collection] ||= find_association_class(reflection).all(reflection.options.slice(:conditions, :order))
 
-      attribute = case reflection.macro
-        when :belongs_to
-          reflection.options[:foreign_key] || :"#{reflection.name}_id"
-        when :has_one
-          raise ":has_one association are not supported by f.association"
-        else
-          if options[:as] == :select
-            html_options = options[:input_html] ||= {}
-            html_options[:size]   ||= 5
-            html_options[:multiple] = true unless html_options.key?(:multiple)
-          end
-
-          :"#{reflection.name.to_s.singularize}_ids"
-      end
+      attribute = find_attribute_in_reflection( reflection, options )
 
       input(attribute, options.merge(:reflection => reflection))
     end
@@ -287,10 +274,55 @@ module SimpleForm
       @object.column_for_attribute(attribute_name) if @object.respond_to?(:column_for_attribute)
     end
 
-    # Find reflection related to association
-    def find_association_reflection(association) #:nodoc:
-      @object.class.reflect_on_association(association) if @object.class.respond_to?(:reflect_on_association)
+    # Find the attribute in the given reflection
+    def find_attribute_in_reflection( reflection, options = {} )
+      quacks_like_active_record = reflection.respond_to? :macro
+      quacks_like_data_mapper   = reflection.respond_to? :parent_key
+      
+      if quacks_like_active_record && [:belongs_to, :referenced_in, :embedded_in].include?( reflection.macro )
+        reflection.options[:foreign_key] || :"#{reflection.name}_id"
+        
+      elsif quacks_like_active_record && reflection.macro == :has_one
+        raise ":has_one association are not supported by f.association"
+        
+      elsif quacks_like_data_mapper && reflection.class.name =~ /(ManyToOne|OneToOne)/ # DataMapper's belongs_to and has_one (is the latter supported?)
+        keys = reflection.child_key
+        raise "CPKs in DataMapper are not supported by f.association" if keys.length > 1
+        keys.first.name
+        
+      else
+        if options[:as] == :select
+          html_options = options[:input_html] ||= {}
+          html_options[:size]   ||= 5
+          html_options[:multiple] = true unless html_options.key?(:multiple)
+        end
+        
+        attribute = :"#{reflection.name.to_s.singularize}_ids"
+        if quacks_like_data_mapper && ! reflection.respond_to?(attribute)
+          raise "DataMapper doesn't provide a mechanism for fetching the list of IDs of records associated via this association. You'll have to manually created #{attribute}/#{attribute}= methods"
+        end
+        attribute
+      end
     end
 
+    # Find reflection related to association
+    def find_association_reflection(association) #:nodoc:
+      if @object.class.respond_to?(:reflect_on_association)
+        @object.class.reflect_on_association(association) 
+      elsif @object.class.respond_to?(:relationships)
+        @object.class.relationships[association]
+      end
+    end
+    
+    # Find the class the association uses
+    def find_association_class( reflection )
+      if reflection.respond_to?(:klass) # ActiveRecord, Mongoid
+        reflection.klass
+      elsif reflection.respond_to?(:child_model) # DataMapper
+        reflection.child_model
+      else
+        raise "Could not find association's related class"
+      end
+    end
   end
 end
